@@ -3,9 +3,7 @@
 # Written By: JB Lewis
 # Date: 27-July-2011
 #
-# enumerates enabled users, and sends a reminder to change the password.
-# Multiple reminders are handled by the array "days" containing numbers of days prior to expiration.
-# 25-Sep-13 - Updated the contact phone number from "763-398-7292" to "508-261-8379"
+# Updated to an ADvanced Function - 5/16/2014
 
 ##########################################
 # Functions
@@ -24,8 +22,15 @@ function truncate-log($LogFilePath, $LinesToKeep)
    Short description
 .DESCRIPTION
    Long description
-.PARAMETER SearchRoot
-    Point in AD to begin searching for user account objects
+.PARAMETER email
+    email address of user this cmdlet notifies
+.PARAMETER FirstName
+    first name of the user this cmdlet notifies
+.PARAMETER LastName
+    last name of the user this cmdlet notifies
+.PARAMETER PasswordExpires
+    Password expiration date of the user this cmdlet notifies.  
+    Can be either a DateTime object, as from Get-QADUser, or a filetime value, as from get-ADUSer.
 .PARAMETER SMTPServer
     Fully qualified domain name of the SMTP server you are sending through.  
     Certain settings on the SMTP server may cause it to believe this script is spamming.
@@ -35,16 +40,35 @@ function truncate-log($LogFilePath, $LinesToKeep)
     Full path and filename for the logfile.  If left blank will create a file in the same directory the script is launched from.
 .PARAMETER Loglines
     Number of lines to retain in the logfile.
+.EXAMPLE
+    Get-QADUser -includedProperties PasswordExpires | Send-PasswordReminder -SMTPServer mysmtp.domain.com -SenderAddress IT@domain.com
+    Gets the users in AD, and notifies those whose passwords will exipre soon.
+.EXAMPLE
+    Get-ADUser -Filter {enabled -eq  $True} -Properties "msds-UserPasswordExpiryTimeComputed","mail" 
 
 #>
 Function Send-PasswordReminder {
     [CmdletBinding()]
     param (
-        # What OU to search in AD.  Need to address the differing forms of OU identification
+        # email Address
         [Parameter(Mandatory=$true,
-                   Position=0)]
-        [Alias("SearchBase")]
-        $SearchRoot,
+                   ValueFromPipelineByPropertyName=$true)]
+        $email,
+
+        [Parameter(Mandatory=$true,
+                   ValueFromPipelineByPropertyName=$true)]
+        [Alias("givenName")]
+        $FirstName,
+
+        [Parameter(Mandatory=$true,
+                   ValueFromPipelineByPropertyName=$true)]
+        [Alias("surname")]
+        $LastName,
+
+        [Parameter(Mandatory=$true,
+                   ValueFromPipelineByPropertyName=$true)]
+        [Alias("msds-UserPasswordExpiryTimeComputed")]
+        $PasswordExpires,
 
         # smtp server to send with
         [Parameter(Mandatory=$true,
@@ -68,50 +92,32 @@ Function Send-PasswordReminder {
         [int]
         $LogLines = 5000
     )
-
-    # Use the following format for Get-ADUser
-    # $SearchRoot = "ou=someOU,ou=branchou,ou=trunkou,dc=adatum,dc=com"
-
-    # This snapin is required.
-    # Should add some trapping in case the snap in just isn't available!
-    # REALLY - should just have the script take input from Get-QADUser!
-    Add-PSSnapin Quest.ActiveRoles.ADManagement -erroraction silentlycontinue
-
-    $mailer = new-object Net.Mail.SmtpClient ($smtpserver)
+    Begin {
+        $mailer = new-object Net.Mail.SmtpClient ($smtpserver)
     
+        $Today = Get-Date
+        Add-Content -Path $LogFile -Value "$(Get-Date -Format g) - Starting"
 
-    $now = Get-Date
-    Add-Content -Path $LogFile -Value "$(Get-Date) - Starting"
+        # $Days: Edit this array of values, adding a value for each reminder you want sent 
+        # equal to the number of days before the user's password is set to expire.
+        # Need to implement as a parameter!
+        $days = "14","3","1"
+    } # Begin Block
 
-    #
-    # $Days: Edit this array of values, adding a value for each reminder you want sent 
-    # equal to the number of days before the user's password is set to expire.
-    # Need to implement as a parameter!
-    $days = "14","3","1"
+    Process {
+        Foreach ($Day in $days) {
+	        if ($Day -gt 1){$plural = "s"} else { $plural = ""}
+            if (($PasswordExpires.gettype().fullname) -ne "System.DateTime"){
+                $PasswordExpires = [DateTime]::FromFileTime($PasswordExpires)
+            }
 
-    <# The following provides the same results as the Get-QADUser cmdlet
-    $users = Get-ADUser -Filter {enabled -eq  $True} -Properties "msds-UserPasswordExpiryTimeComputed","mail" -SearchBase $SearchRoot| 
-    Select GivenName, Surname, mail, @{Name='PasswordExpires';Expression={[DateTime]::FromFileTime($_."msds-UserPasswordExpiryTimeComputed")}}
-
-    I'm sure I could do the same thing with adsi, and skip the snapin AND the module.
-    #>
-
-    $UserParams = @{SearchRoot = $SearchRoot
-                    SizeLimit = 0
-                    IncludedProperties = ("PasswordExpires", "email", "FirstName", "LastName")
-                    Enabled = $true
-                    DontUseDefaultIncludedProperties = $true}
-    $Users = Get-QADUser @UserParams
-	
-    Foreach ($Day in $days) {
-	    if ($Day -gt 1){$plural = "s"} else { $plural = ""}
-	    Foreach ($user in $users) {
-		    if (($user.PasswordExpires).dayofyear -eq ($now.AddDays($Day)).dayofyear ) {
+		    if (($PasswordExpires).dayofyear -eq ($Today.AddDays($Day)).dayofyear ) {
 			    # Send an email
 			    $msg = new-object Net.Mail.MailMessage
     		    $msg.From = $SenderAddress
    			    $msg.To.Add($($user.Email))
     		    $msg.subject = "Your Password expires in $Day day$plural"
+    # Format and word the body message as you wish.
     		    $msg.Body = @"
     <html>
     <head>
@@ -178,10 +184,10 @@ Function Send-PasswordReminder {
 			    Write-Verbose "$user's password will expire in $day days, on $($user.PasswordExpires)"
 			    # It would be easy to add some logging here.
 			    Add-Content -Path $LogFile -Value "$(Get-Date) - $user notified $day days prior to expiration"
-		    }
-	    }
-    }
-
-    truncate-log $LogFile, $logLines
-
+		    } # if passwordexipres
+        } #Foreach Day
+    } # Process Block
+    End {
+        truncate-log $LogFile, $logLines
+    } # End Block
 }
